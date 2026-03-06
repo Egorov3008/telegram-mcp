@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 
 from mcp.server.fastmcp import FastMCP
 from telethon import TelegramClient
-from telethon.tl.types import User, Chat, Channel
+from telethon.tl.types import User, Chat, Channel, DocumentAttributeAudio, DocumentAttributeVideo
 
-from config import TG_API_ID, TG_API_HASH, SESSION_PATH
+from config import TG_API_ID, TG_API_HASH, SESSION_PATH, DOWNLOADS_PATH
 
 # Log only to stderr to avoid interfering with stdio transport
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
@@ -40,6 +40,15 @@ def _resolve_chat_id(chat_id: str):
         return int(chat_id)
     except ValueError:
         return chat_id
+
+
+def _get_media_duration(document) -> int | None:
+    """Extract duration from a Document's attributes."""
+    if document and hasattr(document, "attributes"):
+        for attr in document.attributes:
+            if isinstance(attr, (DocumentAttributeAudio, DocumentAttributeVideo)):
+                return attr.duration
+    return None
 
 
 def _entity_type(entity) -> str:
@@ -81,8 +90,20 @@ async def get_messages(chat_id: str, limit: int = 20) -> str:
             else:
                 sender_name = getattr(msg.sender, "title", "Unknown")
         date_str = msg.date.strftime("%Y-%m-%d %H:%M")
-        text = msg.text or "[media/service message]"
-        lines.append(f"[{date_str}] {sender_name}: {text}")
+        if msg.text:
+            text = msg.text
+        elif msg.voice:
+            dur = _get_media_duration(msg.voice)
+            text = f"[voice message, {dur}s]" if dur else "[voice message]"
+        elif msg.video_note:
+            dur = _get_media_duration(msg.video_note)
+            text = f"[video message, {dur}s]" if dur else "[video message]"
+        elif msg.audio:
+            dur = _get_media_duration(msg.audio)
+            text = f"[audio, {dur}s]" if dur else "[audio]"
+        else:
+            text = "[media/service message]"
+        lines.append(f"[{date_str}] (id:{msg.id}) {sender_name}: {text}")
     return "\n".join(lines) if lines else "No messages found."
 
 
@@ -112,6 +133,21 @@ async def count_user_messages(chat_id: str, user_id: int) -> str:
 
     user_name = user.first_name or str(user_id)
     return f"{user_name} sent {count} messages today in this chat."
+
+
+@mcp.tool()
+async def download_voice_message(chat_id: str, message_id: int) -> str:
+    """Download a voice/video/audio message by its ID. Returns the absolute path to the downloaded file."""
+    entity = await client.get_entity(_resolve_chat_id(chat_id))
+    msg = await client.get_messages(entity, ids=message_id)
+    if not msg:
+        return f"Message {message_id} not found."
+    if not msg.media:
+        return f"Message {message_id} has no media."
+    path = await client.download_media(msg, file=str(DOWNLOADS_PATH) + "/")
+    if not path:
+        return "Failed to download media."
+    return f"Downloaded: {path}"
 
 
 if __name__ == "__main__":
